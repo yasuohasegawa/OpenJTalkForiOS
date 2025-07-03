@@ -65,7 +65,7 @@ OpenJTalk/Resources/
 
 ## 🚫 iPhone Simulator Limitation
 
-OpenJTalk does **not** work on the iPhone Simulator. Please test on a real device.
+This project does **not** work on the iPhone Simulator. Please test on a real device.
 
 ---
 
