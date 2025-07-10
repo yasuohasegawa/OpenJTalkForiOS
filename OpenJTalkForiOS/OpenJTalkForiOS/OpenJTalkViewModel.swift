@@ -42,7 +42,9 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
                 Task{
                     try await Task.sleep(nanoseconds: 1_000_000_000)
                     print("Synthesis successful. Playing audio from: \(tempURL!.path)")
-                    self.playAudio(from: tempURL!)
+                    DispatchQueue.main.async {
+                        self.playAudio(from: tempURL!)
+                    }
                 }
             }
         }
