@@ -50,6 +50,13 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
         }
     }
     
+    func extractPhoneme(text: String) -> String{
+        print(">>>>> extractPhoneme called")
+        let phonemes = openJTalk.extractPhonemes(fromText: text)
+        print(">>>>> extractPhoneme completed: \(phonemes)")
+        return phonemes.joined(separator: ",")
+    }
+    
     private func playAudio(from url: URL) {
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)

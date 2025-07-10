@@ -154,6 +154,52 @@
     });
 }
 
+- (NSArray<NSString *> *)extractPhonemesFromText:(NSString *)text {
+    NSMutableArray<NSString *> *phonemes = [NSMutableArray array];
+
+    char *mecab_buffer = (char *)calloc(2048, sizeof(char));
+    text2mecab(mecab_buffer, (char *)[text UTF8String]);
+    Mecab_analysis(&self->_mecab, mecab_buffer);
+    free(mecab_buffer);
+
+    mecab2njd(&self->_njd, Mecab_get_feature(&self->_mecab), Mecab_get_size(&self->_mecab));
+    
+    njd_set_pronunciation(&self->_njd);
+    njd_set_digit(&self->_njd);
+    njd_set_accent_phrase(&self->_njd);
+    njd_set_accent_type(&self->_njd);
+    njd_set_unvoiced_vowel(&self->_njd);
+    njd_set_long_vowel(&self->_njd);
+
+    njd2jpcommon(&self->_jpcommon, &self->_njd);
+    JPCommon_make_label(&self->_jpcommon);
+
+    if (JPCommon_get_label_size(&self->_jpcommon) > 0) {
+        const char **labels = JPCommon_get_label_feature(&self->_jpcommon);
+        size_t label_count = JPCommon_get_label_size(&self->_jpcommon);
+
+        for (int i = 0; i < label_count; ++i) {
+            NSString *label = [NSString stringWithUTF8String:labels[i]];
+
+            // Extract the phoneme part between "-" and "+" (e.g. k=o in k-s+o)
+            NSRange dashRange = [label rangeOfString:@"-"];
+            NSRange plusRange = [label rangeOfString:@"+"];
+            if (dashRange.location != NSNotFound && plusRange.location != NSNotFound &&
+                plusRange.location > dashRange.location) {
+                NSString *phoneme = [label substringWithRange:NSMakeRange(dashRange.location + 1,
+                                                                          plusRange.location - dashRange.location - 1)];
+                [phonemes addObject:phoneme];
+            }
+        }
+    }
+
+    Mecab_refresh(&self->_mecab);
+    NJD_refresh(&self->_njd);
+    JPCommon_refresh(&self->_jpcommon);
+
+    return [phonemes copy];
+}
+
 - (void)clear {
     Mecab_clear(&_mecab);
     NJD_clear(&_njd);

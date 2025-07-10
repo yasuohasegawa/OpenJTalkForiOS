@@ -15,6 +15,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface OpenJTalk : NSObject
 
 - (void)synthesize:(NSString *)text pitch:(double)pitch toURL:(NSURL *)outputURL completion:(void (^)(NSError * _Nullable error))completion;
+- (NSArray<NSString *> *)extractPhonemesFromText:(NSString *)text;
 
 @end
 

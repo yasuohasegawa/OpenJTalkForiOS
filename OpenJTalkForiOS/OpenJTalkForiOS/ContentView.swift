@@ -15,6 +15,8 @@ struct ContentView: View {
     本作は、ヴィンテージ感漂うブラックのレザーアッパーに、ワイドなキルティングステッチを施した、クラシックな佇まい。サイドを駆け抜けるホワイトのフォームストリップのエッジとそして折り返しタンのトリムには、アルゼンチン代表を彷彿とさせる、鮮やかなライトブルーが差し込まれている。ヒールにはプーマキャットと共に、伝説的なプレーヤーたちが背負ったナンバー"10"をプリント。まるでプレイ後の譲土加工を施したミッドソールと、飴色のガムソールがノスタルジックな雰囲気を醸し出す。
     """
     
+    @State private var phoneme:String = ""
+    
     var body: some View {
         VStack {
             Button(action: {
@@ -26,6 +28,20 @@ struct ContentView: View {
                     .foregroundColor(.white)
                     .clipShape(Capsule())
             }
+            
+            Button(action: {
+                DispatchQueue.main.async {
+                    phoneme = viewModel.extractPhoneme(text: inputText)
+                }
+            }) {
+                Text("Extract the phoneme from text")
+                    .padding()
+                    .background(.blue)
+                    .foregroundColor(.white)
+                    .clipShape(Capsule())
+            }
+            
+            Text(phoneme)
         }
         .padding()
     }
