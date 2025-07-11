@@ -21,14 +21,14 @@ enum SynthesizerError: Error {
 class OpenJTalkViewModel: NSObject, ObservableObject {
     private let openJTalk = OpenJTalk()
     private var audioPlayer: AVAudioPlayer?
-
+    private var engine: AVAudioEngine? = nil
+    private var playerNode: AVAudioPlayerNode? = nil
+    
     private var phonemeMap: [String: Int] = [:]
     private var encoderModel: MLModel! = nil
     private var decoderModel: MLModel! = nil
     private var vocoderModel: MLModel! = nil
     
-    // The model was trained on LJSpeech, which has a sample rate of 22050 Hz.
-    // This is a critical piece of information.
     private let sampleRate = 22050.0
     
     override init(){
@@ -45,9 +45,8 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
     
     func loadModels() throws {
         do {
-            // Load the three Core ML models
             let config = MLModelConfiguration()
-            config.computeUnits = .cpuAndGPU
+            config.computeUnits = .all
             
             self.encoderModel = try MLModel(contentsOf: FastSpeech2Encoder.urlOfModelInThisBundle, configuration: config)
             self.decoderModel = try MLModel(contentsOf: FastSpeech2Decoder.urlOfModelInThisBundle, configuration: config)
@@ -78,33 +77,42 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
     func synthesize(text: String, completion: @escaping (Result<AVAudioPCMBuffer, Error>) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                // Steps 1-7 are the same as your code...
                 let phonemes = self.openJTalk.extractPhonemes(fromText: text)
-                print(">>>>> extractPhoneme completed: \(phonemes)")
                 guard !phonemes.isEmpty else {
                     throw SynthesizerError.preprocessingFailed("Phoneme extraction returned no phonemes.")
                 }
+                
+                // 1. Preprocess text into phoneme IDs (unchanged)
                 let inputIDs = try self.preprocess(phonemes: phonemes)
-                let (hiddenStates, logDurations) = try self.runEncoder(inputIDs: inputIDs)
-                let expandedHiddenStates = try self.performLengthRegulation(hiddenStates: hiddenStates, logDurations: logDurations)
-                let melSpectrogram = try self.runDecoder(expandedHiddenStates: expandedHiddenStates)
                 
-                let ptr = melSpectrogram.floatDataPointer
-                let minVal = (0..<melSpectrogram.count).map { ptr[$0] }.min()
-                let maxVal = (0..<melSpectrogram.count).map { ptr[$0] }.max()
-                print("mel min: \(minVal), max: \(maxVal)")
+                // 2. Run encoder to get hidden states, durations, PITCH, and ENERGY
+                let encoderOutput = try self.runEncoder(inputIDs: inputIDs)
                 
-                //self.debugSave(multiArray: melSpectrogram, filename: "debug_mel_spectrogram.txt")
+                // 3. Expand all features using the predicted durations
+                let decoderInputs = try self.performLengthRegulation(
+                    hiddenStates: encoderOutput.hs,
+                    logDurations: encoderOutput.logDurations,
+                    pitch: encoderOutput.pitch,
+                    energy: encoderOutput.energy
+                )
+                
+                // 4. Run the decoder with the three expanded inputs
+                let melSpectrogram = try self.runDecoder(
+                    expandedHiddenStates: decoderInputs.hs,
+                    expandedPitch: decoderInputs.pitch,
+                    expandedEnergy: decoderInputs.energy
+                )
+                
+                // 5. Run vocoder to get waveform (unchanged)
                 let waveform = try self.runVocoder(melSpectrogram: melSpectrogram)
-                //self.debugSave(multiArray: waveform, filename: "debug_waveform.txt")
+                
+                // 6. Postprocess into an audio buffer (unchanged)
                 let audioBuffer = try self.postprocess(waveform: waveform)
                 
-                // Now, instead of saving/playing, we just return the buffer
                 DispatchQueue.main.async {
                     completion(.success(audioBuffer))
                 }
             } catch {
-                // If any step fails, return the error
                 DispatchQueue.main.async {
                     completion(.failure(error))
                 }
@@ -126,9 +134,7 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
         }
         
         var synthesizedBuffers: [AVAudioPCMBuffer] = []
-        
-        // --- THIS IS THE CORRECTED SERIAL PROCESSING LOGIC ---
-        
+                
         // Define a recursive function to process one chunk at a time.
         func synthesizeChunk(at index: Int) {
             // Base case: If we've processed all chunks, we're done.
@@ -177,6 +183,7 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
             
             print("All chunks synthesized. Concatenating and saving audio...")
             do {
+                //self.playBufferDirectly(finalBuffer)
                 let url = try FileManager.default
                     .url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
                     .appendingPathComponent("final_speech.wav")
@@ -210,10 +217,10 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
     func writePCMBuffer(url: URL, buffer: AVAudioPCMBuffer) throws {
         let settings = [
             AVFormatIDKey: Int(kAudioFormatLinearPCM),
-            AVSampleRateKey: sampleRate, // <--- Make sure you use the correct sampleRate
+            AVSampleRateKey: sampleRate,
             AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 32,
-            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMBitDepthKey: 32, // or 16
+            AVLinearPCMIsFloatKey: true, // or false
             AVLinearPCMIsBigEndianKey: false,
         ] as [String : Any]
         let audioFile = try AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
@@ -224,70 +231,83 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
     private func preprocess(phonemes: [String]) throws -> MLMultiArray {
         let unkID = self.phonemeMap["<unk>"] ?? 0
         let ids = phonemes.map { self.phonemeMap[$0] ?? unkID }
-
-        // Create MLMultiArray for the Encoder input
-        // Shape: [1, sequence_length], DType: Int64
-        let multiArray = try MLMultiArray(shape: [1, NSNumber(value: ids.count)], dataType: .int32) // Int32 is often fine, but Int64 matches Python
+        let multiArray = try MLMultiArray(shape: [1, NSNumber(value: ids.count)], dataType: .int32)
         for (index, id) in ids.enumerated() {
             multiArray[index] = NSNumber(value: id)
         }
         return multiArray
     }
     
-    private func runEncoder(inputIDs: MLMultiArray) throws -> (hs: MLMultiArray, logDurations: MLMultiArray) {
+    private func runEncoder(inputIDs: MLMultiArray) throws -> (hs: MLMultiArray, logDurations: MLMultiArray, pitch: MLMultiArray, energy: MLMultiArray) {
         let encoderInput = try! MLDictionaryFeatureProvider(dictionary: ["input_ids": inputIDs])
         
         let prediction = try encoderModel.prediction(from: encoderInput)
         
         guard let hiddenStates = prediction.featureValue(for: "encoded_phonemes")?.multiArrayValue,
-              let logDurations = prediction.featureValue(for: "log_durations")?.multiArrayValue else {
-            throw SynthesizerError.predictionFailed("Encoder did not produce expected outputs.")
+              let logDurations = prediction.featureValue(for: "log_durations")?.multiArrayValue,
+              let pitch = prediction.featureValue(for: "pitch_predictions")?.multiArrayValue,
+              let energy = prediction.featureValue(for: "energy_predictions")?.multiArrayValue else {
+            throw SynthesizerError.predictionFailed("Encoder did not produce all four expected outputs.")
         }
         
-        return (hiddenStates, logDurations)
+        return (hiddenStates, logDurations, pitch, energy)
     }
     
-    private func performLengthRegulation(hiddenStates: MLMultiArray, logDurations: MLMultiArray) throws -> MLMultiArray {
-        // Replicates: torch.clamp(torch.round(d_outs.exp() - 1), min=0).long()
-        let logDurationsBuffer = UnsafeMutableBufferPointer(start: logDurations.floatDataPointer, count: logDurations.count)
-
-        // Replicates: torch.clamp(torch.round(d_outs.exp() - 1), min=0).long()
-        // Now we can safely .map the buffer.
+    private func performLengthRegulation(hiddenStates: MLMultiArray, logDurations: MLMultiArray, pitch: MLMultiArray, energy: MLMultiArray) throws -> (hs: MLMultiArray, pitch: MLMultiArray, energy: MLMultiArray) {
+        
+        let logDurationsBuffer = UnsafeBufferPointer(start: logDurations.floatDataPointer, count: logDurations.count)
+        
         let durations = logDurationsBuffer.map { logDurationValue in
-            max(0, round(exp(logDurationValue) - 1))
+            Int(round(max(1.0, exp(logDurationValue) - 1.0)))
         }
-        print("logDuration value sample: \(logDurationsBuffer.prefix(10))")
 
-        let totalLength = Int(durations.reduce(0, +))
-        let hiddenSize = hiddenStates.shape[2].intValue // Should be 384
+        let totalLength = durations.reduce(0, +)
+        let hiddenSize = hiddenStates.shape[2].intValue
         
-        // Allocate the output tensor for the decoder
-        let expandedStates = try MLMultiArray(shape: [1, NSNumber(value: totalLength), NSNumber(value: hiddenSize)], dataType: .float32)
+        let expandedHS = try MLMultiArray(shape: [1, NSNumber(value: totalLength), NSNumber(value: hiddenSize)], dataType: .float32)
+        let expandedPitch = try MLMultiArray(shape: [1, NSNumber(value: totalLength)], dataType: .float32)
+        let expandedEnergy = try MLMultiArray(shape: [1, NSNumber(value: totalLength)], dataType: .float32)
         
-        let hsPtr = hiddenStates.floatDataPointer
-        let expandedPtr = expandedStates.floatDataPointer
+        let hsInPtr = hiddenStates.floatDataPointer
+        let pitchInPtr = pitch.floatDataPointer
+        let energyInPtr = energy.floatDataPointer
+        
+        let hsOutPtr = expandedHS.floatDataPointer
+        let pitchOutPtr = expandedPitch.floatDataPointer
+        let energyOutPtr = expandedEnergy.floatDataPointer
         
         var writeIndex = 0
         for phonemeIndex in 0..<durations.count {
-            let duration = Int(durations[phonemeIndex])
+            let duration = durations[phonemeIndex]
             if duration == 0 { continue }
             
-            let readStartIndex = phonemeIndex * hiddenSize
+            // Pointers to the single vector/value for the current phoneme
+            let hsReadStartPtr = hsInPtr.advanced(by: phonemeIndex * hiddenSize)
+            let pitchValue = pitchInPtr[phonemeIndex]
+            let energyValue = energyInPtr[phonemeIndex]
             
-            // Repeat the hidden state vector for `duration` times
+            // Repeat the features for `duration` times
             for _ in 0..<duration {
-                let writeStartIndex = writeIndex * hiddenSize
-                // Copy one hidden state vector (e.g., 384 floats)
-                expandedPtr.advanced(by: writeStartIndex).update(from: hsPtr.advanced(by: readStartIndex), count: hiddenSize)
+                let hsWriteStartPtr = hsOutPtr.advanced(by: writeIndex * hiddenSize)
+                // Copy the hidden state vector
+                hsWriteStartPtr.update(from: hsReadStartPtr, count: hiddenSize)
+                // Set the repeated pitch and energy values
+                pitchOutPtr[writeIndex] = pitchValue
+                energyOutPtr[writeIndex] = energyValue
+                
                 writeIndex += 1
             }
         }
         
-        return expandedStates
+        return (expandedHS, expandedPitch, expandedEnergy)
     }
 
-    private func runDecoder(expandedHiddenStates: MLMultiArray) throws -> MLMultiArray {
-        let decoderInput = try! MLDictionaryFeatureProvider(dictionary: ["expanded_hidden_states": expandedHiddenStates])
+    private func runDecoder(expandedHiddenStates: MLMultiArray, expandedPitch: MLMultiArray, expandedEnergy: MLMultiArray) throws -> MLMultiArray {
+        let decoderInput = try! MLDictionaryFeatureProvider(dictionary: [
+            "expanded_hidden_states": expandedHiddenStates,
+            "expanded_pitch": expandedPitch,
+            "expanded_energy": expandedEnergy
+        ])
         
         let prediction = try decoderModel.prediction(from: decoderInput)
         
@@ -302,6 +322,7 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
         print("melSpectrogram shape: \(melSpectrogram.shape)")
         // IMPORTANT: Transpose mel from [1, Time, 80] to [1, 80, Time] for HiFi-GAN
         let transposedMel = try self.transpose(mel: melSpectrogram)
+        print("transposedMel shape: \(transposedMel.shape)")
         
         let vocoderInput = try! MLDictionaryFeatureProvider(dictionary: ["mel_spectrogram": transposedMel])
         let prediction = try vocoderModel.prediction(from: vocoderInput)
@@ -353,7 +374,7 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
         return buffer
     }
 
-    /// Transposes an MLMultiArray from [1, Time, Channels] to [1, Channels, Time].
+    // Transposes an MLMultiArray from [1, Time, Channels] to [1, Channels, Time].
     private func transpose(mel: MLMultiArray) throws -> MLMultiArray {
         let timeSteps = mel.shape[1].intValue
         let numChannels = mel.shape[2].intValue // Should be 80
@@ -417,6 +438,33 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
 
         } catch {
             print("AVAudioPlayer failed with error: \(error.localizedDescription)")
+        }
+    }
+    
+    func playBufferDirectly(_ buffer: AVAudioPCMBuffer) {
+        engine = AVAudioEngine()
+        playerNode = AVAudioPlayerNode()
+
+        guard let engine = engine, let playerNode = playerNode else {
+            print("❌ Failed to set up AVAudioEngine or PlayerNode")
+            return
+        }
+
+        engine.attach(playerNode)
+        engine.connect(playerNode, to: engine.mainMixerNode, format: buffer.format)
+
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+            try AVAudioSession.sharedInstance().setActive(true)
+            
+            try engine.start()
+            playerNode.scheduleBuffer(buffer, at: nil, options: .interrupts) {
+                print("✅ Playback finished")
+            }
+            playerNode.play()
+            print("▶️ Playing directly from AVAudioPCMBuffer")
+        } catch {
+            print("❌ Error starting audio engine or playback: \(error.localizedDescription)")
         }
     }
     
