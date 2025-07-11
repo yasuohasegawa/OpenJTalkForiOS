@@ -8,6 +8,7 @@
 import Foundation
 import AVFoundation
 import Speech
+import CoreML
 
 extension AVSpeechSynthesizer {
     func write(_ utterance: AVSpeechUtterance) -> AsyncStream<AVAudioBuffer> {
@@ -26,5 +27,11 @@ extension AVSpeechSynthesizer {
 extension FixedWidthInteger {
     var littleEndianData: Data {
         withUnsafeBytes(of: self.littleEndian) { Data($0) }
+    }
+}
+
+extension MLMultiArray {
+    var floatDataPointer: UnsafeMutablePointer<Float32> {
+        return self.dataPointer.bindMemory(to: Float32.self, capacity: self.count)
     }
 }
