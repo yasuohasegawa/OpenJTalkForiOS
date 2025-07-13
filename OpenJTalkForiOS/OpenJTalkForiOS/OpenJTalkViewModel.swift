@@ -25,6 +25,8 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
     private var playerNode: AVAudioPlayerNode? = nil
     
     private var phonemeMap: [String: Int] = [:]
+    private let g2pConverter = G2PConverter()
+    
     private var encoderModel: MLModel! = nil
     private var decoderModel: MLModel! = nil
     private var vocoderModel: MLModel! = nil
@@ -33,8 +35,13 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
     
     override init(){
         super.init()
-        try! loadModels()
-        try! loadPhonemeMap()
+        // japanese
+//        try! loadModels()
+//        try! loadPhonemeMap()
+        
+        // english
+        try! loadModelsEn()
+        try! loadPhonemeMap_en()
         
         do {
             try saveEmptyWavFile(filename: "speech.wav")
@@ -60,8 +67,39 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
         }
     }
     
+    func loadModelsEn() throws {
+        do {
+            let config = MLModelConfiguration()
+            config.computeUnits = .all
+            
+            self.encoderModel = try MLModel(contentsOf: FastSpeech2Encoder_en.urlOfModelInThisBundle, configuration: config)
+            self.decoderModel = try MLModel(contentsOf: FastSpeech2Decoder_en.urlOfModelInThisBundle, configuration: config)
+            
+            let vocoderConfig = MLModelConfiguration()
+            vocoderConfig.computeUnits = .cpuAndGPU
+            self.vocoderModel = try MLModel(contentsOf: HiFiGAN_en.urlOfModelInThisBundle, configuration: vocoderConfig)
+            print("[CoreML DEBUG] \(#function): Loaded models successfully.")
+        } catch {
+            throw SynthesizerError.modelLoadingFailed(error.localizedDescription)
+        }
+    }
+    
     func loadPhonemeMap() throws {
         guard let mapURL = Bundle.main.url(forResource: "jsut_phoneme_map", withExtension: "json") else {
+            throw SynthesizerError.phonemeMapLoadingFailed
+        }
+        
+        do {
+            let data = try Data(contentsOf: mapURL)
+            self.phonemeMap = try JSONDecoder().decode([String: Int].self, from: data)
+            print("[CoreML DEBUG] \(#function): Loaded map successfully.")
+        } catch {
+            throw SynthesizerError.phonemeMapLoadingFailed
+        }
+    }
+    
+    func loadPhonemeMap_en() throws {
+        guard let mapURL = Bundle.main.url(forResource: "ljspeech_phoneme_map", withExtension: "json") else {
             throw SynthesizerError.phonemeMapLoadingFailed
         }
         
@@ -167,6 +205,100 @@ class OpenJTalkViewModel: NSObject, ObservableObject {
         synthesizeChunk(at: 0)
     }
 
+    func synthesize_en(text: String, completion: @escaping (Result<AVAudioPCMBuffer, Error>) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let phonemes = self.g2pConverter.convert(text: text)
+                guard !phonemes.isEmpty else {
+                    throw SynthesizerError.preprocessingFailed("Phoneme extraction returned no phonemes.")
+                }
+                
+                // 1. Preprocess text into phoneme IDs (unchanged)
+                let inputIDs = try self.preprocess(phonemes: phonemes)
+                
+                // 2. Run encoder to get hidden states, durations, PITCH, and ENERGY
+                let encoderOutput = try self.runEncoder(inputIDs: inputIDs)
+                
+                // 3. Expand all features using the predicted durations
+                let decoderInputs = try self.performLengthRegulation(
+                    hiddenStates: encoderOutput.hs,
+                    logDurations: encoderOutput.logDurations,
+                    pitch: encoderOutput.pitch,
+                    energy: encoderOutput.energy
+                )
+                
+                // 4. Run the decoder with the three expanded inputs
+                let melSpectrogram = try self.runDecoder(
+                    expandedHiddenStates: decoderInputs.hs,
+                    expandedPitch: decoderInputs.pitch,
+                    expandedEnergy: decoderInputs.energy
+                )
+                
+                // 5. Run vocoder to get waveform (unchanged)
+                let waveform = try self.runVocoder(melSpectrogram: melSpectrogram)
+                
+                // 6. Postprocess into an audio buffer (unchanged)
+                let audioBuffer = try self.postprocess(waveform: waveform)
+                
+                DispatchQueue.main.async {
+                    completion(.success(audioBuffer))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+    
+    func synthesizeAndPlayLongText_en(text: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        // 1. Split text into chunks
+        let separators = CharacterSet(charactersIn: ",.\n")
+        let chunks = text.components(separatedBy: separators).filter {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        
+        guard !chunks.isEmpty else {
+            print("No text chunks to synthesize.")
+            completion(.success(()))
+            return
+        }
+        
+        var synthesizedBuffers: [AVAudioPCMBuffer] = []
+                
+        // Define a recursive function to process one chunk at a time.
+        func synthesizeChunk(at index: Int) {
+            // Base case: If we've processed all chunks, we're done.
+            guard index < chunks.count else {
+                // All chunks are successfully synthesized. Now concatenate and play.
+                processFinalResult(buffers: synthesizedBuffers, error: nil, completion: completion)
+                return
+            }
+            
+            let chunk = chunks[index]
+            print("Synthesizing chunk \(index + 1)/\(chunks.count): '\(chunk)'")
+            
+            // Call the async synthesize function for the current chunk.
+            synthesize_en(text: chunk) { [self] result in
+                switch result {
+                case .success(let buffer):
+                    // On success, add the buffer and process the *next* chunk.
+                    synthesizedBuffers.append(buffer)
+                    synthesizeChunk(at: index + 1)
+                    
+                case .failure(let error):
+                    // On failure, stop immediately and report the error.
+                    print("Error on chunk \(index + 1): \(error)")
+                    processFinalResult(buffers: [], error: error, completion: completion)
+                }
+            }
+        }
+        
+        // Kick off the process with the first chunk (index 0).
+        synthesizeChunk(at: 0)
+    }
+    
+    
     // Helper function to handle the final result after the loop finishes or fails.
     private func processFinalResult(buffers: [AVAudioPCMBuffer], error: Error?, completion: @escaping (Result<Void, Error>) -> Void) {
         DispatchQueue.main.async {

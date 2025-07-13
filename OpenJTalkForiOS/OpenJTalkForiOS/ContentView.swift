@@ -16,6 +16,7 @@ struct ContentView: View {
     """
     @State private var inputText2:String = "こんにちは"
     @State private var inputTest3:String = "静岡県伊東市の田久保真紀市長が「東洋大卒」と学歴を偽ったと指摘されている問題で、事実関係を調査する市議会の百条委員会は１１日、第１回の会合を開いた。田久保市長が大学の「卒業証書」として市議会議長らに提示した書類について、百条委は１８日までに提出するよう求めた。田久保市長は会合後、「弁護士と相談する」と述べた。"
+    @State private var inputTest4:String = "The quick brown fox jumps over the lazy dog. This sentence is a classic pangram, meaning it contains every letter of the alphabet. For decades, it has been used for testing typewriters and computer keyboards. Synthesizing this text will test the system's ability to handle a variety of phonemes in a continuous narrative. We hope the result is clear and understandable."
     @State private var phoneme:String = ""
     
     var body: some View {
@@ -42,10 +43,26 @@ struct ContentView: View {
                     .clipShape(Capsule())
             }
             
-            
             Button(action: {
                 DispatchQueue.main.async {
                     viewModel.synthesizeAndPlayLongText(text: inputTest3) { result in
+                         
+                         if case .failure(let error) = result {
+                             print("Final synthesis failed: \(error)")
+                         }
+                     }
+                }
+            }) {
+                Text("Test FastSpeech HiFiGAN synthesize")
+                    .padding()
+                    .background(.blue)
+                    .foregroundColor(.white)
+                    .clipShape(Capsule())
+            }
+            
+            Button(action: {
+                DispatchQueue.main.async {
+                    viewModel.synthesizeAndPlayLongText_en(text: inputTest4) { result in
                          
                          if case .failure(let error) = result {
                              print("Final synthesis failed: \(error)")
