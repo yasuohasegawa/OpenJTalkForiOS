@@ -63,6 +63,21 @@ OpenJTalk/Resources/
 
 ---
 
+### 🛠 Xcode Build Setup
+
+If you encounter build errors related to missing standard libraries, make sure the following is added:
+
+#### ➕ Link Binary With Libraries
+
+In **Xcode**:
+
+1. Select your project in the Project Navigator
+2. Go to **Build Phases** > **Link Binary With Libraries**
+3. Click the **+** button
+4. Add **`libc++.tbd`** if it is not already listed
+
+---
+
 ## 🚫 iPhone Simulator Limitation
 
 This project does **not** work on the iPhone Simulator. Please test on a real device.
