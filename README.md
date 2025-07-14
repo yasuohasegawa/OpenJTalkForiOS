@@ -78,3 +78,15 @@ We compiled OpenJTalk for iOS using the following sources:
 * [OpenJTalk Dictionary (UTF-8) 1.11](https://sourceforge.net/projects/open-jtalk/files/Dictionary/open_jtalk_dic-1.11/open_jtalk_dic_utf_8-1.11.tar.gz/download)
 
 A helper shell script `build-ios.sh` is included for convenience.
+
+---
+
+## 🚫 Features Branch
+
+This `features` branch is an **experimental** branch. The code here is unpolished and intended as a draft for the iOS integration of **FastSpeech2 + HiFi-GAN**.
+We do not plan to clean up or maintain this branch.
+The refactored version will be available at the following repository:
+
+👉 [https://github.com/yasuohasegawa/ios-fastspeech2-hifigan](https://github.com/yasuohasegawa/ios-fastspeech2-hifigan)
+
+---
